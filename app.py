@@ -1,132 +1,107 @@
+# app.py (메인 Streamlit 앱 파일)
+
 import streamlit as st
-import random
+import pyaudio
+import wave
+from google.cloud import speech_v1p1beta1 as speech # 뉘앙스 분석을 위해 v1p1beta1 사용 고려
+from google.cloud.speech_v1p1beta1 import enums
+import os
+import io
 
-# 가상의 감정 데이터셋 정의
-# 실제 AI 모델이 없는 상태에서 데모를 위해 특정 텍스트에 대해 미리 정의된 감정 점수를 사용합니다.
-virtual_emotion_data = {
-    "나는 오늘 정말 행복해!": {"행복": 0.9, "놀람": 0.05, "중립": 0.05},
-    "정말 지루한 회의였어.": {"지루함": 0.7, "짜증": 0.2, "중립": 0.1},
-    "이거 정말 좋아.": {"행복": 0.7, "중립": 0.2, "놀람": 0.1}, # 진심인 경우
-    "이거 정말 좋아. (비꼬는 말투)": {"비꼬는": 0.8, "짜증": 0.1, "중립": 0.1}, # 비꼬는 경우
-    "아, 정말 짜증나!": {"분노": 0.8, "짜증": 0.15, "슬픔": 0.05},
-    "믿을 수가 없어!": {"놀람": 0.85, "기쁨": 0.1, "중립": 0.05},
-    "너무 슬퍼.": {"슬픔": 0.9, "중립": 0.1},
-    "오늘 날씨가 좋네요.": {"중립": 0.9, "행복": 0.1},
-    "그는 정말 잘했어.": {"칭찬": 0.8, "행복": 0.1, "중립": 0.1},
-    "정말 끔찍했어.": {"혐오": 0.7, "슬픔": 0.2, "분노": 0.1},
-    "나는 아무렇지도 않아.": {"중립": 0.95, "슬픔": 0.05},
-    "이건 완벽해!": {"행복": 0.85, "놀람": 0.1, "칭찬": 0.05},
-    "제발 그만해.": {"짜증": 0.7, "분노": 0.2, "슬픔": 0.1},
-}
+# Google Cloud 인증 정보 설정 (환경 변수 또는 직접 파일 경로 지정)
+# os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "path/to/your/google_cloud_key.json"
 
-def analyze_emotion(text):
-    """
-    가상의 감정 데이터셋을 사용하여 감정을 분석하는 함수.
-    실제 AI 모델 대신 미리 정의된 데이터를 사용합니다.
-    """
-    if not text.strip():
-        return {}
+# --- 1. Streamlit UI 설정 ---
+st.set_page_config(page_title="실시간 대화 도우미", layout="wide")
+st.title("🗣️ 실시간 대화 도우미")
+st.write("상대방의 말을 실시간 자막으로 보고 뉘앙스까지 확인하세요.")
 
-    # 입력 텍스트가 가상 데이터셋에 있는지 확인
-    for key, emotions in virtual_emotion_data.items():
-        if text.strip().lower() == key.lower():
-            return dict(sorted(emotions.items(), key=lambda item: item[1], reverse=True))
+# --- 2. 오디오 스트림 설정 (PyAudio) ---
+# PyAudio 설정 (샘플 레이트, 채널 등)
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000 # 음성 인식에 적합한 샘플 레이트
 
-    # 가상 데이터셋에 없는 경우, 일반적인 중립 또는 무작위 감정 반환 (선택 사항)
-    # 여기서는 "중립"을 기본으로 하되, 약간의 무작위성을 추가합니다.
-    st.warning("입력된 텍스트에 대한 가상의 감정 데이터가 없습니다. '중립' 감정으로 처리됩니다.")
-    
-    # 더 많은 감정 유형을 포함하고 싶다면 아래 리스트를 확장하세요.
-    all_possible_emotions = ["행복", "슬픔", "분노", "놀람", "혐오", "두려움", "중립", "비꼬는", "지루함", "짜증", "칭찬"]
-    
-    # 중립 감정 위주로 무작위 점수 생성
-    simulated_emotions = {"중립": 0.7 + random.random() * 0.2} # 0.7 ~ 0.9
-    remaining_score = 1.0 - simulated_emotions["중립"]
-    
-    other_emotions = [e for e in all_possible_emotions if e != "중립"]
-    if other_emotions:
-        num_other_emotions = min(len(other_emotions), 3) # 최대 3가지 다른 감정 추가
-        random.shuffle(other_emotions)
-        
-        scores_for_others = [random.random() for _ in range(num_other_emotions)]
-        total_other_scores = sum(scores_for_others)
-        
-        for i in range(num_other_emotions):
-            emotion = other_emotions[i]
-            simulated_emotions[emotion] = scores_for_others[i] / total_other_scores * remaining_score
-            
-    return dict(sorted(simulated_emotions.items(), key=lambda item: item[1], reverse=True))
+# --- 3. Google Cloud Speech-to-Text 클라이언트 초기화 ---
+client = speech.SpeechClient()
 
-
-st.set_page_config(page_title="AI 기반 감정 분석 문자 번역기", layout="centered")
-
-st.markdown("""
-<style>
-.main-header {
-    font-size: 2.5em;
-    color: #4CAF50;
-    text-align: center;
-    margin-bottom: 20px;
-}
-.subheader {
-    font-size: 1.2em;
-    color: #555;
-    text-align: center;
-    margin-bottom: 30px;
-}
-.emotion-score {
-    font-weight: bold;
-    color: #333;
-}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown('<h1 class="main-header">🧠 AI 기반 감정 분석 문자 번역기</h1>', unsafe_allow_html=True)
-st.markdown('<p class="subheader">상대방의 표정이나 말투를 AI가 분석해 감정을 텍스트로 표시합니다.</p>', unsafe_allow_html=True)
-
-st.write("---")
-
-st.header("텍스트 입력 및 감정 분석")
-user_input = st.text_area(
-    "분석할 텍스트를 입력하세요 (가상 데이터 예시를 참고하세요):",
-    height=150,
-    placeholder="예: '나는 오늘 정말 행복해!', '이거 정말 좋아.', '이거 정말 좋아. (비꼬는 말투)', '정말 지루한 회의였어.'"
+# 스트리밍 요청 설정 (뉘앙스 분석을 위해 enable_automatic_punctuation, enable_word_time_offsets, language_code_override 등 활용)
+config = speech.RecognitionConfig(
+    encoding=enums.RecognitionConfig.AudioEncoding.LINEAR16,
+    sample_rate_hertz=RATE,
+    language_code="ko-KR", # 한국어 설정
+    enable_automatic_punctuation=True, # 자동 구두점 추가
+    enable_word_time_offsets=True, # 단어별 시간 오프셋 (뉘앙스 분석에 활용 가능)
+    # model="default", # 또는 "enhanced" 모델 사용 고려
+    use_enhanced=True, # 향상된 모델 사용
 )
 
-if st.button("감정 분석하기"):
-    if user_input:
-        st.info("분석 중입니다...")
-        emotions = analyze_emotion(user_input)
+streaming_config = speech.StreamingRecognitionConfig(
+    config=config,
+    interim_results=True, # 중간 결과 표시
+)
 
-        if emotions:
-            st.subheader("분석 결과:")
-            st.write("입력된 텍스트의 주요 감정:")
-            
-            # Display primary emotion
-            primary_emotion = list(emotions.keys())[0]
-            primary_score = emotions[primary_emotion]
-            st.success(f"**{primary_emotion}**: {primary_score:.2f}")
+# --- 4. 실시간 음성 인식 및 뉘앙스 분석 함수 ---
+def listen_and_transcribe():
+    p = pyaudio.PyAudio()
+    stream = p.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK)
 
-            st.write("---")
-            st.write("모든 감정 점수:")
-            for emotion, score in emotions.items():
-                st.write(f"- <span class='emotion-score'>{emotion}</span>: {score:.2f}", unsafe_allow_html=True)
-        else:
-            st.warning("분석할 텍스트가 없습니다. 텍스트를 입력해주세요.")
-    else:
-        st.warning("텍스트를 입력하고 '감정 분석하기' 버튼을 눌러주세요.")
+    st.info("말씀해주세요...")
+    placeholder = st.empty() # 실시간 자막을 업데이트할 placeholder
 
-st.write("---")
+    requests = (speech.StreamingRecognizeRequest(audio_content=audio_chunk)
+                for audio_chunk in generate_audio_chunks(stream))
+    responses = client.streaming_recognize(streaming_config, requests)
 
-st.markdown("""
-### 🌟 주요 기능 및 특징:
-* **기능:** 상대방의 표정이나 말투를 AI가 분석해 감정을 텍스트로 표시합니다.
-* **기술:** 음성 톤 분석, 표정 인식, 감정 분석 NLP (이 데모에서는 텍스트 NLP만 시뮬레이션).
-* **특징:**
-    * 상대의 '기분'이나 '뉘앙스'를 이해하는 데 도움을 줍니다.
-    * 예: "좋아"라는 말이 '진심'인지, '비꼬는지' 등 해석.
-* **유용성:** 청각뿐 아니라 감정 이해의 어려움을 보완합니다.
-""")
+    # 뉘앙스 분석을 위한 간단한 로직 (예시)
+    def analyze_nuance(text, words_info):
+        # 여기에 뉘앙스를 분석하는 복잡한 로직을 추가합니다.
+        # 예를 들어, 특정 단어의 억양(pitch), 음량(volume) 변화,
+        # 문장 끝의 구두점 등을 분석하여 뉘앙스를 추론할 수 있습니다.
+        # '응?'과 '응!'을 구분하는 예시:
+        if text.endswith("?"):
+            return f"**{text}** (질문)"
+        elif text.endswith("!"):
+            return f"**{text}** (확신/동의)"
+        elif "응" in text:
+            # '응'이라는 단어가 포함되었을 때 추가적인 분석 필요
+            # Google Cloud Speech-to-Text의 억양/감정 정보는 직접 제공되지 않으므로,
+            # 별도의 NLP 라이브러리(예: KoBERT 기반 감성 분석 모델)를 연동해야 합니다.
+            return f"**{text}** (뉘앙스 분석 필요)"
+        return text # 기본 텍스트 반환
 
-st.markdown("---")
-st.caption("이 웹 앱은 AI 기반 감정 분석 문자 번역기의 개념을 보여주기 위한 데모입니다. 실제 AI 모델 통합이 필요하며, 현재는 가상의 데이터로 작동합니다.")
+    for response in responses:
+        if not response.results:
+            continue
+
+        result = response.results[0]
+        if not result.alternatives:
+            continue
+
+        transcript = result.alternatives[0].transcript
+        words_info = result.alternatives[0].words # 단어별 정보 (시간 오프셋 등)
+
+        display_text = analyze_nuance(transcript, words_info)
+        placeholder.markdown(f"### {display_text}") # 자막 업데이트
+
+        if result.is_final:
+            st.success(f"최종 결과: {display_text}")
+            # 여기에 최종 결과에 대한 추가 처리 로직을 넣을 수 있습니다.
+
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+
+def generate_audio_chunks(stream):
+    while True:
+        data = stream.read(CHUNK)
+        yield data
+
+# --- 5. 앱 실행 버튼 ---
+if st.button("실시간 대화 시작"):
+    listen_and_transcribe()
